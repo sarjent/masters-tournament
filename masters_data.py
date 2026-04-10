@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from masters_helpers import ESPN_HEADSHOT_URL, ESPN_PLAYER_IDS, _masters_thursday, get_espn_headshot_url, get_player_country
+from masters_helpers import ESPN_HEADSHOT_URL, ESPN_PLAYER_IDS, get_espn_headshot_url, get_player_country
 
 logger = logging.getLogger(__name__)
 
@@ -267,15 +267,15 @@ class MastersDataSource:
         return f"{display_hour}:{minute:02d} {suffix}"
 
     def _computed_fallback_meta(self) -> Dict:
-        """Compute a best-guess Masters window using the April 6-12 Thursday rule.
+        """Compute a best-guess Masters window: second Thursday of April.
 
         Used only when ESPN doesn't currently return the Masters (off-season).
         """
         now = datetime.now(timezone.utc)
         year = now.year
-        start = _masters_thursday(year)
+        start = self._second_thursday_of_april(year)
         if now > start + timedelta(days=4):
-            start = _masters_thursday(year + 1)
+            start = self._second_thursday_of_april(year + 1)
         # Cover all four calendar days (Thu–Sun) through end-of-day, matching
         # the normalization applied to ESPN's parsed endDate.
         end = start + timedelta(days=3, hours=23, minutes=59, seconds=59)
@@ -290,8 +290,12 @@ class MastersDataSource:
 
     @staticmethod
     def _second_thursday_of_april(year: int) -> datetime:
-        """Alias kept for backwards compatibility — delegates to _masters_thursday."""
-        return _masters_thursday(year)
+        """Second Thursday of April at 12:00 UTC (≈ 8am ET tee-off)."""
+        d = datetime(year, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # weekday(): Mon=0 … Thu=3
+        days_to_first_thursday = (3 - d.weekday()) % 7
+        first_thursday = d + timedelta(days=days_to_first_thursday)
+        return first_thursday + timedelta(days=7)
 
     # ── Schedule / tee times ─────────────────────────────────────
 
@@ -611,7 +615,6 @@ class MastersDataSource:
                     "current_hole": status.get("hole"),
                     "status": status.get("displayValue", ""),
                     "tee_time": status.get("teeTime"),
-                    "is_active": self._is_active_competitor(entry),
                 })
 
         except Exception as e:
@@ -619,23 +622,11 @@ class MastersDataSource:
 
         return players
 
-    # ESPN values that indicate a player is no longer competing (missed cut,
-    # withdrawal, disqualification). Returning 0 for these would misrepresent
-    # them as even par; callers should check `is_active` on the player dict.
-    _INACTIVE_SCORE_VALUES = frozenset({"MC", "WD", "DQ", "CUT", "MDF", "--"})
-
     def _calculate_score_to_par(self, entry: Dict) -> int:
-        """Calculate player's score relative to par.
-
-        Returns 0 for inactive players (MC/WD/DQ/etc.) — callers should check
-        the companion ``is_active`` field on the player dict to distinguish
-        "even par" from "not competing".
-        """
+        """Calculate player's score relative to par."""
         try:
             display_value = (entry.get("score") or {}).get("displayValue", "E")
             if not display_value or display_value in ("-", "E"):
-                return 0
-            if display_value.upper() in self._INACTIVE_SCORE_VALUES:
                 return 0
             if display_value.startswith("+"):
                 return int(display_value[1:])
@@ -644,11 +635,6 @@ class MastersDataSource:
             return 0
         except Exception:
             return 0
-
-    def _is_active_competitor(self, entry: Dict) -> bool:
-        """Return False for players who have missed the cut, withdrawn, or been DQ'd."""
-        display_value = ((entry.get("score") or {}).get("displayValue") or "").upper().strip()
-        return display_value not in self._INACTIVE_SCORE_VALUES
 
     def _get_today_score(self, score_data: Dict) -> Optional[int]:
         """Get today's round score relative to par (None when not yet playing)."""
