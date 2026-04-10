@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+test_renders/
+assets/headshots/
+assets/logos/
+*.log
