@@ -386,6 +386,7 @@ def get_detailed_phase(
     date: Optional[datetime] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    post_tournament_display_days: int = 1,
 ) -> str:
     """
     Determine detailed tournament phase including time-of-day awareness.
@@ -398,7 +399,8 @@ def get_detailed_phase(
         "tournament-live"     - Tournament day, play in progress (~8am-7pm ET)
         "tournament-evening"  - Tournament day, play finished (~7pm-midnight ET)
         "tournament-overnight"- Tournament day, overnight (midnight-6am ET)
-        "post-tournament"     - Sunday evening / Monday after Masters
+        "post-tournament"     - Sunday evening through N days after Masters
+                                (controlled by post_tournament_display_days)
     """
     date = _to_eastern(date)
 
@@ -419,7 +421,7 @@ def get_detailed_phase(
                 return "tournament-live"
             return "tournament-evening"
 
-        if date > end_e and (date - end_e) <= timedelta(days=1):
+        if date > end_e and (date - end_e) <= timedelta(days=post_tournament_display_days):
             return "post-tournament"
 
         delta = start_e - date
@@ -456,8 +458,9 @@ def get_detailed_phase(
             else:
                 return "tournament-evening"
 
-        # Monday after
-        if day == 14:
+        # Post-tournament: N days after Sunday (day 13)
+        post_end_day = 13 + post_tournament_display_days
+        if 14 <= day <= post_end_day:
             return "post-tournament"
 
     # March - countdown month
