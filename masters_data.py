@@ -209,6 +209,14 @@ class MastersDataSource:
                 # of that calendar day so phase checks treat all of Sunday's
                 # play as in-tournament rather than post-tournament.
                 end_date = end_date + timedelta(hours=23, minutes=59, seconds=59)
+            if start_date is not None and end_date is not None:
+                # Cap end_date to Sunday of tournament week. ESPN keeps the
+                # event active for days after the final round (results/stats
+                # pages), which causes the plugin to think the tournament is
+                # still running. The Masters always ends on Sunday = start + 3d.
+                max_end = start_date + timedelta(days=3, hours=23, minutes=59, seconds=59)
+                if end_date > max_end:
+                    end_date = max_end
 
             status_obj = {}
             competitions = event.get("competitions", [])
@@ -267,18 +275,24 @@ class MastersDataSource:
         return f"{display_hour}:{minute:02d} {suffix}"
 
     def _computed_fallback_meta(self) -> Dict:
-        """Compute a best-guess Masters window: second Thursday of April.
+        """Compute a best-guess Masters window using the correct Thursday rule.
 
         Used only when ESPN doesn't currently return the Masters (off-season).
         """
+        from masters_helpers import _masters_thursday
         now = datetime.now(timezone.utc)
         year = now.year
-        start = self._second_thursday_of_april(year)
+        start = _masters_thursday(year)
         if now > start + timedelta(days=4):
-            start = self._second_thursday_of_april(year + 1)
-        # Cover all four calendar days (Thu–Sun) through end-of-day, matching
-        # the normalization applied to ESPN's parsed endDate.
-        end = start + timedelta(days=3, hours=23, minutes=59, seconds=59)
+            start = _masters_thursday(year + 1)
+        # _masters_thursday returns noon UTC (08:00 EDT). Normalise to midnight
+        # EDT (04:00 UTC) before computing the end so that +3 days +23:59:59
+        # lands on Sunday 23:59:59 EDT (April 12) rather than Monday morning
+        # UTC (April 13). This keeps end_e.date() == Sunday in EDT, matching
+        # the ESPN-parsed endDate path and making post-tournament day counting
+        # come out correctly.
+        thu_midnight_edt = start.replace(hour=4, minute=0, second=0, microsecond=0)
+        end = thu_midnight_edt + timedelta(days=3, hours=23, minutes=59, seconds=59)
         return {
             "name": "Masters Tournament",
             "start_date": start,
@@ -290,12 +304,15 @@ class MastersDataSource:
 
     @staticmethod
     def _second_thursday_of_april(year: int) -> datetime:
-        """Second Thursday of April at 12:00 UTC (≈ 8am ET tee-off)."""
-        d = datetime(year, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
-        # weekday(): Mon=0 … Thu=3
-        days_to_first_thursday = (3 - d.weekday()) % 7
-        first_thursday = d + timedelta(days=days_to_first_thursday)
-        return first_thursday + timedelta(days=7)
+        """Backwards-compatible alias — delegates to the correct algorithm.
+
+        The original 'second Thursday of April' rule gave wrong dates for
+        2022 (Apr 13, actual Apr 7) and 2023 (Apr 13, actual Apr 6).
+        The correct rule is the Thursday between April 6-12 inclusive.
+        This method is kept so any external callers are not broken.
+        """
+        from masters_helpers import _masters_thursday
+        return _masters_thursday(year)
 
     # ── Schedule / tee times ─────────────────────────────────────
 

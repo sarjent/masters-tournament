@@ -1,0 +1,16 @@
+[
+  {
+    "id": "masters-tournament",
+    "name": "Masters Tournament",
+    "description": "Broadcast-quality Masters Tournament display with real ESPN player headshots, accurate Augusta National hole layouts, fun facts, past champions, live leaderboards, and pixel-perfect LED matrix rendering",
+    "version": "2.4.4",
+    "author": "ChuckBuilds",
+    "repo": "https://github.com/sarjent/masters-tournament",
+    "plugin_path": "",
+    "branch": "main",
+    "latest_version": "2.4.4",
+    "tags": ["sports", "golf", "tournament", "leaderboard", "masters", "augusta"],
+    "min_display_size": {"width": 32, "height": 16},
+    "recommended_display_size": {"width": 128, "height": 64}
+  }
+]

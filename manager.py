@@ -9,7 +9,7 @@ fun facts, past champions, and Augusta National branding year-round.
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
@@ -21,9 +21,12 @@ from masters_renderer import MastersRenderer
 from masters_renderer_enhanced import MastersRendererEnhanced
 from logo_loader import MastersLogoLoader
 from masters_helpers import (
+    AUGUSTA_HOLES,
+    _masters_thursday,
     calculate_tournament_countdown,
     filter_favorite_players,
     get_detailed_phase,
+    get_score_description,
     get_tournament_phase,
     sort_leaderboard,
 )
@@ -133,6 +136,16 @@ class MastersTournamentPlugin(BasePlugin):
         self._last_player_card_advance = 0.0
         self._player_card_interval = config.get("player_card_duration", 8)
 
+        # Live alert detection — track score and hole state between updates
+        self._previous_scores: Dict[str, int] = {}  # player_name -> score
+        self._previous_thru: Dict[str, int] = {}  # player_name -> thru (holes completed)
+        self._alert_queue: List[Dict] = []  # pending birdie/eagle alerts
+        self._alert_index = 0
+        self._last_alert_advance = 0.0
+        self._alert_dwell = config.get("display_modes", {}).get(
+            "live_action", {}
+        ).get("duration", 10)
+
         # Vegas scroll mode: fixed card block width. Cards render at
         # (scroll_card_width × display_height) regardless of the panel width
         # so long chained displays (e.g. 5×64 = 320 wide) scroll smoothly
@@ -150,6 +163,10 @@ class MastersTournamentPlugin(BasePlugin):
 
     PHASE_MODES = {
         "off-season": [
+            # masters_countdown appears 3x out of 10 entries (~30% screen time)
+            # so it dominates the rotation after the post-tournament window closes.
+            "masters_countdown",
+            "masters_countdown",
             "masters_fun_facts",
             "masters_past_champions",
             "masters_course_tour",
@@ -331,6 +348,9 @@ class MastersTournamentPlugin(BasePlugin):
 
         sorted_board = sort_leaderboard(raw_leaderboard)
 
+        # Detect score changes for live alerts before filtering
+        self._detect_score_changes(sorted_board)
+
         favorites = self.config.get("favorite_players", [])
         top_n = self.config.get("display_modes", {}).get("leaderboard", {}).get("top_n", 10)
         always_show = self.config.get("display_modes", {}).get("leaderboard", {}).get(
@@ -341,6 +361,68 @@ class MastersTournamentPlugin(BasePlugin):
             sorted_board, favorites, top_n=top_n, always_show_favorites=always_show
         )
         self.logger.debug(f"Updated leaderboard with {len(self._leaderboard_data)} players")
+
+    def _detect_score_changes(self, leaderboard: List[Dict]) -> None:
+        """Compare current scores against previous update to detect birdies/eagles.
+
+        Only generates alerts when exactly one hole was completed since the last
+        poll (previous_thru + 1 == current_thru). When multiple holes elapsed
+        between polls the aggregate delta can't be attributed to a single hole,
+        so we skip the alert and just update stored state.
+        """
+        new_scores: Dict[str, int] = {}
+        new_thru: Dict[str, int] = {}
+        new_alerts: List[Dict] = []
+
+        for player in leaderboard:
+            name = player.get("player", "")
+            score = player.get("score", 0)
+            hole = player.get("current_hole") or 0
+            thru = player.get("thru", 0)
+            if isinstance(thru, str):
+                try:
+                    thru = int(thru) if thru.strip() not in ("", "F", "-") else 0
+                except ValueError:
+                    thru = 0
+            new_scores[name] = score
+            new_thru[name] = thru
+
+            if not self._previous_scores or name not in self._previous_scores:
+                continue
+
+            prev_score = self._previous_scores[name]
+            prev_thru = self._previous_thru.get(name, 0)
+
+            change = score - prev_score  # negative = improvement
+            if change >= 0:
+                continue
+
+            # Only classify when exactly one hole was completed since last poll
+            if thru != prev_thru + 1:
+                self.logger.debug(
+                    f"Skipping alert for {name}: thru jumped {prev_thru}->{thru} "
+                    f"(score {prev_score}->{score})"
+                )
+                continue
+
+            hole_par = AUGUSTA_HOLES.get(hole, {}).get("par", 4)
+            desc = get_score_description(change, hole_par)
+
+            if desc in ("Birdie", "Eagle", "Albatross"):
+                new_alerts.append({
+                    "player": name,
+                    "hole": hole,
+                    "score_desc": desc,
+                })
+                self.logger.info(f"Live alert: {name} {desc} on hole {hole}")
+
+        self._previous_scores = new_scores
+        self._previous_thru = new_thru
+
+        if new_alerts:
+            self._alert_queue = new_alerts
+            self._alert_index = 0
+            self._last_alert_advance = time.time()
 
     def _update_schedule(self):
         """Update schedule data from API."""
@@ -451,7 +533,12 @@ class MastersTournamentPlugin(BasePlugin):
             self._last_hole_advance["course_tour"] = now
         elif last == 0:
             self._last_hole_advance["course_tour"] = now
-        return self._show_image(self.renderer.render_hole_card(self._current_hole))
+        show_divider = self.config.get("display_modes", {}).get(
+            "course_tour", {}
+        ).get("show_divider", True)
+        return self._show_image(
+            self.renderer.render_hole_card(self._current_hole, show_divider=show_divider)
+        )
 
     def _display_amen_corner(self, force_clear: bool) -> bool:
         return self._show_image(self.renderer.render_amen_corner())
@@ -474,7 +561,10 @@ class MastersTournamentPlugin(BasePlugin):
         elif last == 0:
             self._last_hole_advance["featured"] = now
         hole = featured[self._featured_hole_index % len(featured)]
-        return self._show_image(self.renderer.render_hole_card(hole))
+        show_divider = self.config.get("display_modes", {}).get(
+            "course_tour", {}
+        ).get("show_divider", True)
+        return self._show_image(self.renderer.render_hole_card(hole, show_divider=show_divider))
 
     def _display_schedule(self, force_clear: bool) -> bool:
         page = self._advance_page("schedule")
@@ -483,9 +573,32 @@ class MastersTournamentPlugin(BasePlugin):
         )
 
     def _display_live_action(self, force_clear: bool) -> bool:
-        """Show live alert if enhanced renderer available, else leaderboard."""
-        if hasattr(self.renderer, "render_live_alert") and self._leaderboard_data:
-            # Show the leader's current status as a live alert
+        """Show live birdie/eagle alerts, falling back to the leader."""
+        if not hasattr(self.renderer, "render_live_alert"):
+            return self._display_leaderboard(force_clear)
+
+        # Rotate through queued alerts on a dwell timer
+        if self._alert_queue:
+            now = time.time()
+            if now - self._last_alert_advance >= self._alert_dwell:
+                self._alert_index += 1
+                self._last_alert_advance = now
+            # Expire the queue once we've shown all alerts
+            if self._alert_index >= len(self._alert_queue):
+                self._alert_queue = []
+                self._alert_index = 0
+            else:
+                alert = self._alert_queue[self._alert_index]
+                return self._show_image(
+                    self.renderer.render_live_alert(
+                        alert["player"],
+                        alert["hole"],
+                        alert["score_desc"],
+                    )
+                )
+
+        # No pending alerts — show the leader's current status
+        if self._leaderboard_data:
             leader = self._leaderboard_data[0]
             return self._show_image(
                 self.renderer.render_live_alert(
@@ -527,8 +640,11 @@ class MastersTournamentPlugin(BasePlugin):
             target = meta["start_date"]
         else:
             # Hard fallback — should be unreachable, but keep the screen alive.
-            now = datetime.utcnow()
-            target = datetime(now.year, 4, 10, 12, 0, 0)
+            now = datetime.now(timezone.utc)
+            year = now.year
+            target = _masters_thursday(year)
+            if target <= now:
+                target = _masters_thursday(year + 1)
         countdown = calculate_tournament_countdown(target)
         return self._show_image(
             self.renderer.render_countdown(
@@ -555,11 +671,46 @@ class MastersTournamentPlugin(BasePlugin):
         this gives you a smoothly-scrolling ticker of ~128-wide blocks
         instead of one full-panel card at a time. Matches the pattern used
         by the other sports scoreboard plugins.
+
+        Content is phase-aware:
+          off-season / pre-tournament  → countdown card only
+          practice / tournament / post → leaderboard + holes + fun facts
         """
-        cards = []
+        meta_start, meta_end = self._meta_dates()
+        phase = get_detailed_phase(
+            start_date=meta_start,
+            end_date=meta_end,
+            post_tournament_display_days=self._post_tournament_display_days,
+        )
+
         cw = self._scroll_card_width
         ch = self.display_height
 
+        # Off-season and pre-tournament: countdown card only.
+        if phase in ("off-season", "pre-tournament"):
+            countdown_enabled = self.config.get("display_modes", {}).get(
+                "countdown", {}
+            ).get("enabled", True)
+            if not countdown_enabled:
+                return None
+            meta = self._tournament_meta or {}
+            target = meta.get("start_date")
+            if target is None:
+                target = self.data_source._computed_fallback_meta().get("start_date")
+            if not target:
+                return None
+            countdown = calculate_tournament_countdown(target)
+            card = self.renderer.render_countdown(
+                countdown["days"], countdown["hours"], countdown["minutes"]
+            )
+            if not card:
+                return None
+            if card.size != (cw, ch):
+                card = card.resize((cw, ch), Image.Resampling.LANCZOS)
+            return [card]
+
+        # Practice / tournament / post-tournament: leaderboard + holes + fun facts.
+        cards = []
         for player in self._leaderboard_data[:10]:
             card = self.renderer.render_player_card(
                 player, card_width=cw, card_height=ch,
@@ -567,15 +718,16 @@ class MastersTournamentPlugin(BasePlugin):
             if card:
                 cards.append(card)
 
+        show_divider = self.config.get("display_modes", {}).get(
+            "course_tour", {}
+        ).get("show_divider", True)
         for hole in range(1, 19):
             card = self.renderer.render_hole_card(
-                hole, card_width=cw, card_height=ch,
+                hole, card_width=cw, card_height=ch, show_divider=show_divider,
             )
             if card:
                 cards.append(card)
 
-        # Fun facts — respect user's enabled setting.
-        # Use single-line wide cards so horizontal scroll reveals the full text.
         fun_facts_enabled = self.config.get("display_modes", {}).get(
             "fun_facts", {}
         ).get("enabled", True)

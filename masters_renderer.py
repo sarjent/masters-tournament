@@ -923,7 +923,8 @@ class MastersRenderer:
 
     def render_hole_card(self, hole_number: int,
                          card_width: Optional[int] = None,
-                         card_height: Optional[int] = None) -> Optional[Image.Image]:
+                         card_height: Optional[int] = None,
+                         show_divider: bool = True) -> Optional[Image.Image]:
         cw = card_width if card_width is not None else self.width
         ch = card_height if card_height is not None else self.height
         hole_info = get_hole_info(hole_number)
@@ -1103,6 +1104,9 @@ class MastersRenderer:
         for word in words:
             # Break oversized words into chunks that fit.
             if self._text_width(draw, word, font) > max_w:
+                if current_line:
+                    lines.append(current_line)
+                    current_line = ""
                 for ch in word:
                     test = current_line + ch
                     if self._text_width(draw, test, font) <= max_w:
